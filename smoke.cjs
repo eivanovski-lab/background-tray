@@ -236,9 +236,14 @@ const p = new PluginClass(app, { id:"background-tray" });
   ok(log.shown===shownB+1 && log.focused===focusedB+1, "show: main window shown and focused");
   ok(popA.electronWindow.shownInactive===1 && popB.electronWindow.shownInactive===1 && popLayout.electronWindow.shownInactive===1, "show: the hidden secondary windows come back (without stealing focus)");
   ok(popHiddenAlready.electronWindow.shownInactive===0 && popHiddenAlready.electronWindow.shown===0, "show: a window we did not hide is not shown");
+  // The tray click and Show / Hide menu use toggleWindow, not hideWindow directly.
+  p5.toggleWindow();
+  ok(fakeWin._visible===false && popA.electronWindow.hidden===2 && popB.electronWindow.hidden===2 && popLayout.electronWindow.hidden===2, "tray toggle hides the main window, Settings, and pop-outs together");
+  p5.toggleWindow();
+  ok(fakeWin._visible===true && popA.electronWindow.shownInactive===2 && popB.electronWindow.shownInactive===2 && popLayout.electronWindow.shownInactive===2, "tray toggle restores the main window, Settings, and pop-outs together");
   // hide via tray / command → same treatment, and a window closed meanwhile is skipped
   p5.hideWindow(); popB.electronWindow.destroyed=true; p5.showWindow();
-  ok(popA.electronWindow.hidden===2 && popA.electronWindow.shownInactive===2 && popB.electronWindow.shownInactive===1, "tray hide/show: same for secondaries; a window destroyed while hidden is skipped");
+  ok(popA.electronWindow.hidden===3 && popA.electronWindow.shownInactive===3 && popB.electronWindow.shownInactive===2, "tray hide/show: same for secondaries; a window destroyed while hidden is skipped");
   // a real quit must NOT stop Obsidian's quit hook (it saves the layout and closes pop-outs itself)
   p5.reallyQuitting=true; let stopped5b=false, prevented5b=false;
   bu.forEach(fn=>fn({ preventDefault(){prevented5b=true;}, stopImmediatePropagation(){stopped5b=true;} }));
@@ -246,7 +251,7 @@ const p = new PluginClass(app, { id:"background-tray" });
   p5.reallyQuitting=false; p5.hideWindow();
   p5.onunload();
   ok(global.window.open===_origOpen, "onunload: window.open restored");
-  ok(popA.electronWindow.shownInactive===3, "onunload: secondary windows hidden by the plugin are shown again (nothing stays invisible)");
+  ok(popA.electronWindow.shownInactive===4, "onunload: secondary windows hidden by the plugin are shown again (nothing stays invisible)");
 
   // ── issue #3 follow-up (b): Relaunch with a hidden vault picker (or several vaults) around ──
   //   app.exit() fires "closed" per window without a before-quit; Obsidian's handler then marks the vault

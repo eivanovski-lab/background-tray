@@ -755,7 +755,7 @@ export default class BackgroundTrayPlugin extends Plugin {
 		if (!win) return;
 		try {
 			if (win.isVisible() && !win.isMinimized()) {
-				win.hide();
+				this.hideWindow();
 			} else {
 				this.showWindow();
 			}
