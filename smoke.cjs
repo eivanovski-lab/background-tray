@@ -16,7 +16,7 @@ let notices=[]; class Notice { constructor(m){ notices.push(m); } }
 const obsidianStub = { Plugin, PluginSettingTab, Setting, Notice, App: class {} };
 
 // ── @electron/remote stub ──
-const log = { listeners:{}, hidden:0, shown:0, focused:0, trayCreated:0, trayDestroyed:0, prevented:0, quit:0, appQuit:0, closeSeq:[] };
+const log = { listeners:{}, hidden:0, shown:0, focused:0, trayCreated:0, trayDestroyed:0, prevented:0, quit:0, appQuit:0, closeSeq:[], iconPaths:[], cancelClose:false, closeAttempted:false };
 const fakeWin = {
   _visible:true, _min:false,
   on(ev,fn){ (log.listeners[ev]=log.listeners[ev]||[]).push(fn); },
@@ -26,17 +26,19 @@ const fakeWin = {
   showInactive(){ this._visible=true; log.shownInactive=(log.shownInactive||0)+1; },
   focus(){ log.focused++; },
   isVisible(){ return this._visible; }, isMinimized(){ return this._min; }, restore(){ this._min=false; },
-  close(){ log.quit++; log.closeSeq.push("win.close"); }, setSkipTaskbar(){}, isDestroyed(){ return false; }, id:1,
+  close(){ log.quit++; log.closeAttempted=true; log.closeSeq.push("win.close"); }, setSkipTaskbar(){}, isDestroyed(){ return log.closeAttempted&&!log.cancelClose; }, id:1,
 };
-class Tray { constructor(i){ this.icon=i; log.trayCreated++; } setToolTip(t){ log.tooltip=t; } setContextMenu(){} on(){} destroy(){ log.trayDestroyed++; } }
+class Tray { constructor(i){ this.icon=i; log.trayCreated++; } setToolTip(t){ log.tooltip=t; } setContextMenu(){} on(){} destroy(){ log.trayDestroyed++; log.closeSeq.push("tray.destroy"); } }
 const Menu = { buildFromTemplate(t){ log.menuTemplate=t; return {_t:t}; } };
 const nativeImage = { createFromPath(){ return {isEmpty(){return true;}}; }, createFromDataURL(){ return {isEmpty(){return false;}}; }, createEmpty(){ return {}; } };
+const emptyFileIcon = {isEmpty(){return true;}};
+let fileIconFactory = () => emptyFileIcon;
 // Registry of app (main-process) events — used to exercise the single-instance relaunch path.
 const appEvents = {};
 const remoteStub = { getCurrentWindow(){ return fakeWin; }, Tray, Menu, nativeImage, app:{
   quit(){log.quit++; log.appQuit++;}, relaunch(){ log.closeSeq.push("app.relaunch"); }, exit(){ log.closeSeq.push("app.exit"); }, dock:{show(){}},
   emit(ev){ log.closeSeq.push("emit:"+ev); return true; },
-  async getFileIcon(){ return {isEmpty(){return true;}}; },
+  async getFileIcon(path){ log.iconPaths.push(path); return fileIconFactory(path); },
   prependListener(ev,fn){ (appEvents[ev]=appEvents[ev]||[]).unshift(fn); },
   on(ev,fn){ (appEvents[ev]=appEvents[ev]||[]).push(fn); },
   removeListener(ev,fn){ appEvents[ev]=(appEvents[ev]||[]).filter(f=>f!==fn); },
@@ -75,7 +77,14 @@ const p = new PluginClass(app, { id:"background-tray" });
 
 (async () => {
   let fail=0; const ok=(c,m)=>{ console.log((c?"  PASS":"  FAIL")+" — "+m); if(!c)fail++; };
-  await p.onload();
+  const originalExecPath=process.execPath;
+  const bundleIcon={isEmpty(){return false;}};
+  if(process.platform==="darwin") {
+    process.execPath="/Applications/Obsidian.app/Contents/MacOS/Obsidian";
+    fileIconFactory=path=>path.endsWith(".app")?bundleIcon:emptyFileIcon;
+  }
+  try { await p.onload(); } finally { process.execPath=originalExecPath; fileIconFactory=()=>emptyFileIcon; }
+  if(process.platform==="darwin") ok(log.iconPaths.length===1 && log.iconPaths[0]==="/Applications/Obsidian.app" && p.tray.icon===bundleIcon, "macOS: the tray uses the bundle icon without falling back to the executable");
   ok(log.trayCreated===1, "creates exactly one tray");
   ok((log.listeners["close"]||[]).length===1, "registers exactly one close listener");
   ok(p._commands.length===3, "registers 3 commands (show/hide/toggle)");
@@ -150,12 +159,21 @@ const p = new PluginClass(app, { id:"background-tray" });
   const appQuitBefore=log.appQuit; log.closeSeq=[];
   picker2.destroy=function(){ this.destroyed++; log.closeSeq.push("picker.destroy"); };
   p2.quitCompletely();
-  ok(log.closeSeq.join(">")==="picker.destroy>win.close", "quitCompletely: destroys the hidden vault picker, THEN closes our window (order verified)");
+  ok(log.closeSeq.join(">")==="tray.destroy>picker.destroy>win.close", "quitCompletely: removes the native icon and hidden picker BEFORE closing the vault window");
   ok(log.appQuit===appQuitBefore, "quitCompletely: closes only this vault's window — never app.quit() (other open vaults keep running)");
   // Bypass check: while reallyQuitting, a close event must not be preventDefault-ed
   let prevented2=false; (log.listeners["close"]||[]).forEach(fn=>fn({preventDefault(){prevented2=true;}}));
   ok(prevented2===false, "close interception is bypassed while reallyQuitting");
   p2.onunload();
+
+  const pCancelled = new PluginClass(app, {id:"background-tray"}); await pCancelled.onload();
+  log.cancelClose=true;
+  pCancelled.quitCompletely();
+  ok(pCancelled.reallyQuitting===true && pCancelled.tray===null, "cancelled Quit does not immediately restore the tray during a pending close");
+  await new Promise(resolve=>setTimeout(resolve,5100));
+  ok(pCancelled.reallyQuitting===false && pCancelled.tray!==null, "cancelled Quit completely restores the tray and normal background behavior");
+  log.cancelClose=false;
+  pCancelled.onunload();
 
   // ── issue #3 (b): a real close with "Run in background" OFF also takes the hidden picker along ──
   const p3 = new PluginClass(app, {id:"background-tray"}); await p3.onload();
@@ -168,6 +186,21 @@ const p = new PluginClass(app, { id:"background-tray" });
   ok(prevented3===false && log.hidden===hiddenBefore3, "run-in-background OFF: close is not intercepted");
   ok(picker3.destroyed===1, "run-in-background OFF: the hidden vault picker is destroyed on the real close");
   p3.onunload();
+
+  // A late icon lookup must not resurrect a tray after this vault closes.
+  let lookupStarted; const started=new Promise(resolve=>{lookupStarted=resolve;});
+  let finishLookup;
+  fileIconFactory=()=>{lookupStarted();return new Promise(resolve=>{finishLookup=resolve;});};
+  const pRace = new PluginClass(app, {id:"background-tray"});
+  const loading=pRace.onload();
+  await started;
+  const createdBeforeRace=log.trayCreated;
+  pRace.quitCompletely();
+  finishLookup({isEmpty(){return false;}});
+  await loading;
+  ok(pRace.tray===null && log.trayCreated===createdBeforeRace, "late icon lookup cannot recreate a tray after Quit completely");
+  fileIconFactory=()=>emptyFileIcon;
+  pRace.onunload();
 
   // ── issue #3 (c): turning "Focus existing window on relaunch" off releases the hidden picker ──
   const p4 = new PluginClass(app, {id:"background-tray"}); await p4.onload();
