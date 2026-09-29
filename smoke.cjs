@@ -33,10 +33,12 @@ const Menu = { buildFromTemplate(t){ log.menuTemplate=t; return {_t:t}; } };
 const nativeImage = { createFromPath(){ return {isEmpty(){return true;}}; }, createFromDataURL(){ return {isEmpty(){return false;}}; }, createEmpty(){ return {}; } };
 const emptyFileIcon = {isEmpty(){return true;}};
 let fileIconFactory = () => emptyFileIcon;
+let otherVaultPresent = true;
 // Registry of app (main-process) events — used to exercise the single-instance relaunch path.
 const appEvents = {};
-const remoteStub = { getCurrentWindow(){ return fakeWin; }, Tray, Menu, nativeImage, app:{
-  quit(){log.quit++; log.appQuit++;}, relaunch(){ log.closeSeq.push("app.relaunch"); }, exit(){ log.closeSeq.push("app.exit"); }, dock:{show(){}},
+const remoteStub = { getCurrentWindow(){ return fakeWin; }, Tray, Menu, nativeImage,
+  BrowserWindow:{getAllWindows(){return otherVaultPresent ? [fakeWin,{id:99,isDestroyed(){return false;}}] : [fakeWin];}}, app:{
+  quit(){log.quit++; log.appQuit++; this._emit("before-quit");}, relaunch(){ log.closeSeq.push("app.relaunch"); }, exit(){ log.closeSeq.push("app.exit"); }, dock:{show(){}},
   emit(ev){ log.closeSeq.push("emit:"+ev); return true; },
   async getFileIcon(path){ log.iconPaths.push(path); return fileIconFactory(path); },
   prependListener(ev,fn){ (appEvents[ev]=appEvents[ev]||[]).unshift(fn); },
@@ -165,6 +167,31 @@ const p = new PluginClass(app, { id:"background-tray" });
   let prevented2=false; (log.listeners["close"]||[]).forEach(fn=>fn({preventDefault(){prevented2=true;}}));
   ok(prevented2===false, "close interception is bypassed while reallyQuitting");
   p2.onunload();
+
+  log.closeAttempted=false; otherVaultPresent=false;
+  const pLast = new PluginClass(app, {id:"background-tray"}); await pLast.onload();
+  const appQuitBeforeLast=log.appQuit;
+  pLast.quitCompletely();
+  ok(log.appQuit===appQuitBeforeLast+1 && pLast.tray===null, "last vault Quit completely exits the macOS app, rather than leaving a trayless process");
+  pLast.onunload(); otherVaultPresent=true;
+
+  const originalGetAllWindows=remoteStub.BrowserWindow.getAllWindows;
+  const secondary={id:42,isDestroyed(){return false;}};
+  remoteStub.BrowserWindow.getAllWindows=()=>[fakeWin,secondary];
+  const pSecondary = new PluginClass(app, {id:"background-tray"}); await pSecondary.onload();
+  pSecondary.collectSecondaryWindows=()=>[secondary];
+  const appQuitBeforeSecondary=log.appQuit;
+  pSecondary.quitCompletely();
+  ok(log.appQuit===appQuitBeforeSecondary+1, "last vault with a known Settings/pop-out window exits the app");
+  pSecondary.onunload();
+  remoteStub.BrowserWindow.getAllWindows=()=>[fakeWin,{id:44,isDestroyed(){return false;}}];
+  const pUnknown = new PluginClass(app, {id:"background-tray"}); await pUnknown.onload();
+  pUnknown.collectSecondaryWindows=()=>[];
+  const appQuitBeforeUnknown=log.appQuit;
+  pUnknown.quitCompletely();
+  ok(log.appQuit===appQuitBeforeUnknown, "an unrecognized window never causes app-wide Quit");
+  pUnknown.onunload();
+  remoteStub.BrowserWindow.getAllWindows=originalGetAllWindows;
 
   const pCancelled = new PluginClass(app, {id:"background-tray"}); await pCancelled.onload();
   log.cancelClose=true;

@@ -76,6 +76,7 @@ interface ElectronApp {
 
 interface ElectronRemote {
 	app: ElectronApp;
+	BrowserWindow?: { getAllWindows(): ElectronWindow[] };
 	getCurrentWindow(): ElectronWindow;
 	Tray: new (icon: NativeImageLike) => ElectronTray;
 	Menu: { buildFromTemplate(template: MenuItemTemplate[]): unknown };
@@ -794,19 +795,41 @@ export default class BackgroundTrayPlugin extends Plugin {
 		}
 	}
 
+	private isLastVaultWindow(): boolean {
+		const remote = this.remote;
+		const win = this.win;
+		if (!remote?.BrowserWindow || !win) return false;
+		try {
+			const mine = new Set([
+				win.id,
+				...this.collectSecondaryWindows().map((w) => w.id),
+				...this.hiddenPickers.map((w) => w.id),
+			]);
+			const live = remote.BrowserWindow.getAllWindows().filter(
+				(w) => !w.isDestroyed()
+			);
+			return live.some((w) => w.id === win.id) && live.every((w) => mine.has(w.id));
+		} catch {
+			// Uncertain ownership: close only this vault, never another vault.
+			return false;
+		}
+	}
+
 	quitCompletely() {
 		this.reallyQuitting = true;
 		if (this.closeRecoveryTimer) clearTimeout(this.closeRecoveryTimer);
 		this.destroyTray();
-		// Drop the hidden vault picker first: Obsidian only exits on window-all-closed, so a picker
-		// left behind kept the process alive with no window and no tray (issue #3). Then close just
-		// our window — not app.quit(): with several vaults open, quitting from one tray icon must
-		// not pull the other vaults down (their plugin instances would veto and hide instead).
+		// Drop a hidden vault picker before closing. With other vaults open, close only this
+		// vault; with no other windows, quit the macOS app itself rather than leaving it alive
+		// without a window or tray.
 		this.destroyHiddenPickers();
 		try {
 			if (this.win) {
 				const win = this.win;
-				win.close();
+				// macOS can keep an app alive with no windows. If this is the final vault,
+				// quit the app itself; otherwise close only this vault's window.
+				if (this.isLastVaultWindow()) this.remote?.app.quit();
+				else win.close();
 				// Close can be vetoed by another plugin or beforeunload. Give an accepted
 				// close time to finish before restoring a tray for a still-open vault.
 				if (!win.isDestroyed()) this.closeRecoveryTimer = setTimeout(() => {
